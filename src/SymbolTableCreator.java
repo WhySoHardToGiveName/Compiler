@@ -1,18 +1,19 @@
 import ir.*;
 
 import java.util.ArrayList;
-import java.util.Objects;
+import java.util.Stack;
 
 public class SymbolTableCreator {
     private final error_handler errorHandler;
     private SymbolTable curTable;
     private int cycleDepth = 0;
-    private int regNo = 1;
-    private int curBlockDepth = 0;
+    private int regNo = 0;
     private Function curFunction;
     private final Module module;
     private boolean isGlobal = true;
     private BasicBlock curbb;
+    private final Stack<BasicBlock> whileCondBBStack = new Stack<>();
+    private final Stack<BasicBlock> whileNextBBStack = new Stack<>();
     public SymbolTableCreator(error_handler errorHandler){
         this.errorHandler = errorHandler;
         module = Module.getModule();
@@ -37,10 +38,6 @@ public class SymbolTableCreator {
             return null;
         } else if (name.charAt(0) == '%') {
             ArrayList<Instruction> instructions = curbb.getParentFunction().getInstructions();
-            /*System.out.println("instructions in function");
-            for (Instruction instruction : instructions){
-                System.out.println(instruction);
-            }*/
             for (Instruction instruction : instructions) {
                 if (instruction.getName().equals(name)) {
                     return instruction;
@@ -270,12 +267,10 @@ public class SymbolTableCreator {
         curFunction = function;
         for(int i = 0; i < funcParamNum; i++){
             new Arg("%" + regNo, Type.Var, false, function, i + 1, "int");
-            System.out.println("arg regNo"+regNo);
+            //System.out.println("arg regNo"+regNo);
             regNo++;
         }
-        curbb = new BasicBlock("funcFParamsBB", curFunction, curBlockDepth);
-        regNo++;    //跳过入口基本块寄存器值
-
+        createAndSetBB();     // 先建立基本块
         if(kidTreeList.get(3).getVname().equals("FuncFParams")){
             GrammarTree funcFParamsNode = kidTreeList.get(3);
             // FuncFParams中完成形参的alloca和load
@@ -283,13 +278,13 @@ public class SymbolTableCreator {
         }
         funcSymbol.setFuncInfo(paramTypeList.size(), paramTypeList, paramDimList, isVoid);
         curTable.getParentTable().addSymbol(funcSymbol);
-        Block(blockNode);
+        Block(blockNode);        // 函数体中无需再新建基本块
         curTable = curTable.getParentTable();           // 退出funcTable回到父表
     }
 
     // MainFuncDef → 'int' 'main' '(' ')' Block // g j✔
     public void MainFuncDef(GrammarTree mainFuncDefNode){
-        regNo = 1;
+        regNo = 0;
         ArrayList<GrammarTree> kidTreeList = mainFuncDefNode.getKidTreeList();
         GrammarTree blockNode = kidTreeList.get(kidTreeList.size() - 1);
         errorHandler.checkAndHandleErrorG(blockNode);        //判断并处理错误g
@@ -302,6 +297,7 @@ public class SymbolTableCreator {
         mainFuncTable.setParentTable(curTable);
         curTable.addChildTable(mainFuncTable);
         curTable = mainFuncTable;
+        createAndSetBB();
         Block(blockNode);
         curTable = curTable.getParentTable();           // 退出funcTable回到父表
     }
@@ -349,7 +345,7 @@ public class SymbolTableCreator {
         Symbol paramSymbol = new Symbol(token.getTokenValue(), bType, "%" + regNo, token.getRow(), false, isArray, arrayDim, false);
         // 完成形参的alloca和load
         Instruction allocaInstr = allocaInstr();
-        System.out.println(allocaInstr);
+        //System.out.println(allocaInstr);
         Arg arg = curFunction.getArgs().get(paramNo - 1);
         storeInstr(arg, allocaInstr);
 
@@ -359,18 +355,25 @@ public class SymbolTableCreator {
         paramDimList.add(arrayDim);
     }
 
+    public BasicBlock createBBNoAdd2Func(){       // 创建基本块，不设为当前基本块，不加入函数
+        BasicBlock bb = BasicBlock.createBBNoAdd2Func(String.valueOf(regNo), curFunction);
+        regNo++;
+        return bb;
+    }
+    public BasicBlock createAndSetBB(){     // 新建基本块并设置为当前基本块，加入函数
+        curbb = new BasicBlock(String.valueOf(regNo), curFunction);
+        regNo++;
+        return curbb;
+    }
     // Block → '{' { BlockItem } '}'
     // done
     public void Block(GrammarTree blockNode){
-        curbb = new BasicBlock("Block", curFunction, curBlockDepth); // 新建基本块
-        curBlockDepth++;    // 块深度加一
         ArrayList<GrammarTree> kidTreeList = blockNode.getKidTreeList();
         for (GrammarTree blockItemNode : kidTreeList) {
             if(blockItemNode.getVname().equals("BlockItem")){
                 BlockItem(blockItemNode);
             }
         }
-        curBlockDepth--;    // 块深度减一
     }
 
     // BlockItem → Decl | Stmt
@@ -412,7 +415,7 @@ public class SymbolTableCreator {
                 // done
                 GrammarTree lValNode = kidTreeList.get(0);
                 VtNode identNode = LVal(lValNode);          // 返回标识符节点
-                System.out.println(identNode.getToken().getTokenValue());
+                //System.out.println(identNode.getToken().getTokenValue());
                 Symbol symbol = curTable.getDeclaredSymbol(identNode.getToken().getTokenValue());
                 String symbolReg = symbol.getReg();
                 Value symbolValue = getValue(symbolReg, curbb); // 获取标识符对应value
@@ -424,8 +427,6 @@ public class SymbolTableCreator {
                     if(exp.isConstant()){   // 不用load
                         storeInstr(exp, symbolValue);
                     } else {    // 先load再store
-                       // Instruction loadIns = loadInstr(exp);
-                       // storeInstr(loadIns, symbolValue);
                         storeInstr(exp, symbolValue);
                     }
                 } else {    // LVal '=' 'getint''('')'';'
@@ -455,30 +456,65 @@ public class SymbolTableCreator {
                 curTable = curTable.getParentTable();           // 退出blockTable回到父表
                 break;
             case "if":    // 'if' '(' Cond ')' Stmt [ 'else' Stmt ] // j✔
-                // todo
                 GrammarTree condNode = kidTreeList.get(2);
-                Cond(condNode);
+                BasicBlock trueBB = createBBNoAdd2Func();    // 创建trueBB、falseBB、nextBB, 但不加入函数
+                BasicBlock falseBB = kidTreeList.size() == 7 ? createBBNoAdd2Func() : null;
+                BasicBlock nextBB = createBBNoAdd2Func();
+                Cond(condNode, trueBB, falseBB == null ? nextBB : falseBB);
+                //true分支
+                curbb = trueBB;
+                curFunction.addBasicBlock(trueBB);
                 GrammarTree stmtNode1 = kidTreeList.get(4);
                 Stmt(stmtNode1);
+                //false分支
                 if(kidTreeList.size() == 7){
+                    curbb = falseBB;
+                    curFunction.addBasicBlock(falseBB);
                     GrammarTree stmtNode2 = kidTreeList.get(6);
                     Stmt(stmtNode2);
                 }
+                curbb = nextBB;
+                curFunction.addBasicBlock(nextBB);
+                if (falseBB != null) {  // trueBB to nextBB
+                    Instruction stmtBr = new Instruction("br", Type.Void, false, trueBB, Instruction.OPType.br, "void");
+                    new Use(stmtBr, nextBB, 1);
+                }
                 break;
             case "while":   // 'while' '(' Cond ')' Stmt // j✔
-                // todo
-                Cond(kidTreeList.get(2));
+                BasicBlock condBB = createAndSetBB();
+                BasicBlock whileBB = createBBNoAdd2Func();    // 创建whileBB、nextBB, 但不加入函数
+                BasicBlock nextBB2 = createBBNoAdd2Func();
+                whileCondBBStack.push(condBB);  // condBB和nextBB入栈
+                whileNextBBStack.push(nextBB2);
+                Cond(kidTreeList.get(2), whileBB, nextBB2);
+                //while分支
+                curbb = whileBB;
+                curFunction.addBasicBlock(whileBB);
                 cycleDepth++;
                 Stmt(kidTreeList.get(4));
                 cycleDepth--;
+                // whileBB to condBB
+                Instruction whileBr = new Instruction("br", Type.Void, false, curbb, Instruction.OPType.br, "void");
+                new Use(whileBr, condBB, 1);
+                curbb = nextBB2;
+                curFunction.addBasicBlock(nextBB2);
+                whileCondBBStack.pop();     // condBB和nextBB出栈
+                whileNextBBStack.pop();
                 break;
             case "break":   // 'break' ';' | 'continue' ';' // i✔ m
+                BasicBlock breakBB = whileNextBBStack.peek();
+                Instruction breakBr = new Instruction("br", Type.Void, false, curbb, Instruction.OPType.br, "void");
+                new Use(breakBr, breakBB, 1);
+                break;
             case "continue":
-                // todo
                 if(cycleDepth == 0){
                     VtNode breakToken = (VtNode) kidTreeList.get(0);
                     errorHandler.handleErrorM(breakToken);        //处理错误m
+                    break;
                 }
+                BasicBlock continueBB = whileCondBBStack.peek();
+                Instruction continueBr = new Instruction("br", Type.Void, false, curbb, Instruction.OPType.br, "void");
+                new Use(continueBr, continueBB, 1);
                 break;
             case "return":  // 'return' [Exp] ';' // f i✔
                 // done
@@ -548,9 +584,88 @@ public class SymbolTableCreator {
     }
 
     // Cond → LOrExp
-    public void Cond(GrammarTree condNode){
-        ArrayList<GrammarTree> kidTreeList = condNode.getKidTreeList();
-        LOrExp(kidTreeList.get(0));
+    // LOrExp → LAndExp | LOrExp '||' LAndExp
+    // LAndExp → EqExp | LAndExp '&&' EqExp
+    public void Cond(GrammarTree condNode, BasicBlock trueBB, BasicBlock falseBB){
+        GrammarTree LOrExpNode = condNode.getKidTreeList().get(0);
+        // 先将语法树改为两层list结构,第一层为LAndExp || LAndExp || LAndExp,第二层为EqExp && EqExp && EqExp, 会改变curbb
+        ArrayList<ArrayList<EqExpBlock>> eqExp2LayerList = new ArrayList<>();
+        LOr2EqExpBlockList(LOrExpNode, eqExp2LayerList);
+        // 设置每个LAndExp的trueBB和falseBB
+        for (int i = 0; i < eqExp2LayerList.size(); i++) {
+            ArrayList<EqExpBlock> eqExpBlockList = eqExp2LayerList.get(i);
+            for (int j = 0; j < eqExpBlockList.size(); j++) {
+                EqExpBlock eqExpBlock = eqExpBlockList.get(j);
+                if(i == eqExp2LayerList.size() - 1){        //最后一层的LAndExp, trueBB为传入的trueBB, falseBB为传入的falseBB
+                    if(j == eqExpBlockList.size() - 1){        //最后一个LAndExp
+                        eqExpBlock.setTrueBlock(trueBB);
+                        eqExpBlock.setFalseBlock(falseBB);
+                    } else {
+                        EqExpBlock nextEq = eqExpBlockList.get(j+1);
+                        eqExpBlock.setTrueBlock(nextEq.getBasicBlock()); // 1 && 2, 1为true,则跳转到2
+                        eqExpBlock.setFalseBlock(falseBB);
+                    }
+                } else {
+                    if(j == eqExpBlockList.size() - 1){        //最后一个LAndExp
+                        eqExpBlock.setTrueBlock(trueBB);
+                        EqExpBlock nextEq = eqExp2LayerList.get(i+1).get(0);
+                        eqExpBlock.setFalseBlock(nextEq.getBasicBlock());
+                    } else {
+                        eqExpBlock.setTrueBlock(eqExpBlockList.get(j+1).getBasicBlock()); // 1 && 2, 1为true,则跳转到2
+                        eqExpBlock.setFalseBlock(eqExp2LayerList.get(i+1).get(0).getBasicBlock());
+                    }
+                }
+            }
+        }
+        // 遍历每个LAndExp, 在循环内部设置curbb
+        for (ArrayList<EqExpBlock> eqExpBlockList : eqExp2LayerList) {
+            for (EqExpBlock eqExpBlock : eqExpBlockList) {
+                curbb = eqExpBlock.getBasicBlock();
+                Value eqExp = EqExp(eqExpBlock.getEqExpNode());
+                // if(2) 增加一个ne指令 2 != 0
+                Instruction neIns = null;
+                if (!eqExp.getDataType().equals("boolean")) {
+                    neIns = new Instruction("%" + regNo, Type.Var, false, curbb, Instruction.OPType.ne, "boolean");
+                    regNo++;
+                    new Use(neIns, eqExp, 1);
+                    new Use(neIns, new Constant("0", false, "int", 0), 2);
+                }
+                // 跳转指令
+                Instruction br = new Instruction("br", Type.Void, false, curbb, Instruction.OPType.br, "void");
+                new Use(br, neIns == null ? eqExp : neIns, 1);
+                if (eqExp.isInverseCond()) {    // 是否为!a
+                    new Use(br, eqExpBlock.getFalseBlock(), 2);
+                    new Use(br, eqExpBlock.getTrueBlock(), 3);
+                } else {
+                    new Use(br, eqExpBlock.getTrueBlock(), 2);
+                    new Use(br, eqExpBlock.getFalseBlock(), 3);
+                }
+            }
+        }
+        // LOrExp(kidTreeList.get(0), trueBB, falseBB, nextBB);
+    }
+    // LOrExp → LAndExp | LOrExp '||' LAndExp
+    public void LOr2EqExpBlockList(GrammarTree LOrExpNode, ArrayList<ArrayList<EqExpBlock>> twoLayerList){
+        ArrayList<GrammarTree> kidTreeList = LOrExpNode.getKidTreeList();
+        ArrayList<EqExpBlock> oneLayerList = new ArrayList<>();
+        twoLayerList.add(0, oneLayerList);
+        if(kidTreeList.size() == 1){
+            LAnd2EqExpBlockList(kidTreeList.get(0), oneLayerList);
+        } else {
+            LOr2EqExpBlockList(kidTreeList.get(0), twoLayerList);
+            LAnd2EqExpBlockList(kidTreeList.get(2), oneLayerList);
+        }
+    }
+    // LAndExp → EqExp | LAndExp '&&' EqExp
+    public void LAnd2EqExpBlockList(GrammarTree LAndExpNode, ArrayList<EqExpBlock> eqExpBlockList){
+        ArrayList<GrammarTree> kidTreeList = LAndExpNode.getKidTreeList();
+        if(kidTreeList.size() == 1){
+            eqExpBlockList.add(new EqExpBlock(kidTreeList.get(0), curbb));
+        } else {
+            LAnd2EqExpBlockList(kidTreeList.get(0), eqExpBlockList);
+            eqExpBlockList.add(new EqExpBlock(kidTreeList.get(2), curbb));
+        }
+        createAndSetBB();
     }
 
     // LVal → Ident {'[' Exp ']'} // c k✔
@@ -656,7 +771,8 @@ public class SymbolTableCreator {
                             return instr;
                         }
                     case "!":
-                        return null;
+                        value.inverseCond();
+                        return value;
                 }
                 break;
         }
@@ -792,37 +908,24 @@ public class SymbolTableCreator {
     }
 
     // LAndExp → EqExp | LAndExp '&&' EqExp
-    public Value LAndExp(GrammarTree lAndExpNode){
+    public void LAndExp(GrammarTree lAndExpNode, BasicBlock trueBB, BasicBlock falseBB, BasicBlock nextBB){
         ArrayList<GrammarTree> kidTreeList = lAndExpNode.getKidTreeList();
         if(kidTreeList.size() == 1){
             EqExp(kidTreeList.get(0));
         }else{
-            LAndExp(kidTreeList.get(0));
+            LAndExp(kidTreeList.get(0), trueBB, falseBB, nextBB);
             EqExp(kidTreeList.get(2));
         }
     }
 
     // LOrExp → LAndExp | LOrExp '||' LAndExp
-    public Value LOrExp(GrammarTree lOrExpNode){
+    public void LOrExp(GrammarTree lOrExpNode, BasicBlock trueBB, BasicBlock falseBB, BasicBlock nextBB){
         ArrayList<GrammarTree> kidTreeList = lOrExpNode.getKidTreeList();
         if(kidTreeList.size() == 1){
-            return LAndExp(kidTreeList.get(0));
+            LAndExp(kidTreeList.get(0), trueBB, falseBB, nextBB);
         }else{
-            Value lor = LOrExp(kidTreeList.get(0));
-            // 短路求值
-            if(lor.isConstant()) {
-                Constant constant = (Constant) lor;
-                if (constant.getValue() == 1) {
-                    return lor;
-                }
-            }
-            Value land = LAndExp(kidTreeList.get(2));
-            if(land.isConstant()) {
-                Constant constant = (Constant) land;
-                if (constant.getValue() == 1) {
-                    return land;
-                }
-            }
+            LOrExp(kidTreeList.get(0), trueBB, falseBB, nextBB);
+            LAndExp(kidTreeList.get(2), trueBB, falseBB, nextBB);
         }
     }
 

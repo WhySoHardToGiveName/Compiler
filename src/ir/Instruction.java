@@ -107,6 +107,12 @@ public class Instruction extends User{
             case alloca:
                 str = this.getName() + " = alloca i32, align 4\n";
                 break;
+            case br:
+                if(this.getOperands().size() == 1)
+                    str = "br label %" + this.getOperands().get(0).getName() + "\n";
+                else
+                    str = "br i1 " + this.getOperands().get(0).getName() + ", label %" + this.getOperands().get(1).getName() + ", label %" + this.getOperands().get(2).getName() + "\n";
+                break;
         }
         return str;
     }

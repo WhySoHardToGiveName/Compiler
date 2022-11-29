@@ -9,6 +9,7 @@ public class Value {
     private final LinkedList<Use> useList;
     private boolean isArray;
     private ArrayInfo arrayInfo;
+    private boolean inverseCond = false;
     public class ArrayInfo{
         public int arrayDim;
         public int arraySize1;
@@ -54,5 +55,11 @@ public class Value {
             return ((GlobalVariable) this).isGlobalConstant();
         }
         return false;
+    }
+    public boolean isInverseCond() {
+        return inverseCond;
+    }
+    public void inverseCond() {
+        inverseCond = !inverseCond;
     }
 }

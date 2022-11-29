@@ -11,7 +11,7 @@ public class Module extends BasicBlock{
     private static final Module module = new Module();
 
     private Module() {
-        super("Module", null, 0);
+        super("Module", null);
         this.globalVariables = new ArrayList<>();
         this.funcList = new ArrayList<>();
         new Function("@getint", "int", this);

@@ -31,6 +31,9 @@ public class Function extends Value{
     public void addBasicBlock(BasicBlock basicBlock) {
         basicBlocks.add(basicBlock);
     }
+    public void popBasicBlock() {
+        basicBlocks.remove(basicBlocks.size() - 1);
+    }
     public void addInstruction(Instruction instruction) {
         instructions.add(instruction);
     }
@@ -58,8 +61,9 @@ public class Function extends Value{
             }
         }
         sb.append(") #0 {\n");
-        for (Instruction instruction : instructions) {
-            sb.append(instruction.toString());
+        for (BasicBlock basicBlock : basicBlocks) {
+            //if(basicBlock.getInstructions().size() > 0)
+                sb.append(basicBlock);
         }
         sb.append("}\n");
         return sb.toString();
