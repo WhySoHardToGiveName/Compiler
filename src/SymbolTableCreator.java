@@ -1,6 +1,7 @@
 import ir.*;
 
 import java.util.ArrayList;
+import java.util.Objects;
 import java.util.Stack;
 
 public class SymbolTableCreator {
@@ -45,6 +46,32 @@ public class SymbolTableCreator {
             }
         }
         return null;
+    }
+    //  获得元素的Value并load
+    private Value getArrItemValue(Value arr, ArrayList<Value> indexList){
+        if(arr instanceof GlobalVariable) {
+            if(((GlobalVariable) arr).getOperands().size() == 0)    // 初始化为0
+                return new Constant("0", false, "int", 0);
+            if(arr.isGlobalConstant() && indexList.size() - 1 == arr.getArrayInfo().arrayDim) {  // 直接返回常量
+                boolean allConst = true;
+                for (Value index : indexList) {
+                    if (!index.isConstant()) {
+                        allConst = false;
+                        break;
+                    }
+                }
+                if(allConst){
+                    int offset = 0;
+                    if(arr.getArrayInfo().arrayDim == 1)
+                        offset = ((Constant)indexList.get(1)).getValue();
+                    else if(arr.getArrayInfo().arrayDim == 2)
+                        offset = ((Constant)indexList.get(1)).getValue() * arr.getArrayInfo().arraySize2 + ((Constant)indexList.get(2)).getValue();
+                    return ((GlobalVariable) arr).getOperands().get(offset);
+                }
+            }
+        }
+        Instruction gep = GEP(arr, indexList);
+        return loadInstr(gep);
     }
 
     // CompUnit → {Decl} {FuncDef} MainFuncDef
@@ -124,37 +151,77 @@ public class SymbolTableCreator {
         }
         boolean isArray = false;
         int arrayDim = 0, i = 1;
+        ArrayList<Value> arraySizeList = new ArrayList<>();
         while(i < kidTreeList.size() && kidTreeList.get(i).getVname().equals("[")){
             isArray = true;
             arrayDim++;
-            ConstExp(kidTreeList.get(i + 1));
+            Value arraySize = ConstExp(kidTreeList.get(i + 1));
+            arraySizeList.add(arraySize);
             i += 3;
         }
-        Value initValue = ConstInitVal(kidTreeList.get(kidTreeList.size() - 1));
+        ArrayList<Value> arrValueList = isArray ? new ArrayList<>() : null;
+        Value initValue = ConstInitVal(kidTreeList.get(kidTreeList.size() - 1), arrValueList);      //数组初始化得到arrValueList，非数组初始化得到initValue
         Token token = identNode.getToken();
         User defValue;
-        if(isGlobal){       // @a = global i32 5
-            defValue = new GlobalVariable("@" + token.getTokenValue(), Type.Var, false, "int", true, module);
-            new Use(defValue, initValue, 1);
-        } else {             // %1=alloca i32   %2=store i32 5, i32* %1
-            defValue = allocaInstr();
-            storeInstr(initValue, defValue);
+        if(isGlobal){       // @a = global i32 5        @c = dso_local constant [2 x [1 x i32]] [[1 x i32] [i32 1], [1 x i32] [i32 3]]
+            defValue = new GlobalVariable("@" + token.getTokenValue(), Type.Var, isArray, "int", true, module);
+            if(isArray) {
+                for (int j = 0; j < arrValueList.size(); j++)
+                    new Use(defValue, arrValueList.get(j), j + 1);
+                defValue.setArrayInfo(arrayDim, arraySizeList);
+                defValue.setDataType(getStringDataType(arraySizeList));
+            }
+            else
+                new Use(defValue, initValue, 1);
+        } else {             // %1=alloca i32   %2=store i32 5, i32* %1    //   alloca GEP memset GEP store
+            if(isArray){
+                defValue = allocaInstr(true, arraySizeList, "int");    // %1 = alloca [2 x [2 x i32]]  并设置arrayInfo
+                localArrInit(arrayDim, arraySizeList, arrValueList, defValue);
+            } else {
+                defValue = allocaInstr(false, null, "int");
+                storeInstr(initValue, defValue);
+            }
         }
         Symbol constSymbol = new Symbol(token.getTokenValue(), bType, defValue.getName(), token.getRow(), true, isArray, arrayDim, false);
         curTable.addSymbol(constSymbol);
     }
 
+    private void localArrInit(int arrayDim, ArrayList<Value> arraySizeList, ArrayList<Value> arrValueList, User arrValue) {
+        ArrayList<Value> indexList = new ArrayList<>();
+        for(int j = 1; j <= arrayDim + 1; j++)
+            indexList.add(new Constant("0", false, "int", 0));
+        Instruction gep = GEP(arrValue, indexList);         // %2 = getelementptr [2 x [2 x i32]], [2 x [2 x i32]]* %1, i32 0, i32 0, i32 0
+        int size = 1;       //数组元素个数
+        for(int j = 0; j < arrayDim; j++)
+            size *= ((Constant) arraySizeList.get(j)).getValue();
+        Instruction memsetInstr = new Instruction("@memset", Type.Void, false, curbb, Instruction.OPType.call, "void"); // call void @memset(i32* %2, i32 0, i32 16)
+        new Use(memsetInstr, Objects.requireNonNull(getFunction("memset")), 1);
+        new Use(memsetInstr, gep, 2);
+        new Use(memsetInstr, new Constant("0", false, "int", 0), 3);
+        new Use(memsetInstr, new Constant(String.valueOf(4*size), false, "int", 4*size), 4);
+        for (int j = 0; j < size; j++){
+            ArrayList<Value> itemIndexList = new ArrayList<>();
+            itemIndexList.add(new Constant(String.valueOf(j), false, "int", j));
+            Instruction itemGEP = GEP(gep, itemIndexList);     // %3 = getelementptr i32, i32* %2, i32 0
+            storeInstr(arrValueList.get(j), itemGEP);          // store i32 1, i32* %3
+        }
+    }
+
     // ConstInitVal → ConstExp
     //    | '{' [ ConstInitVal { ',' ConstInitVal } ] '}'
-    // done
-    public Value ConstInitVal(GrammarTree constInitValNode){
+    // 如果是数组，将初始化的值放在数组里,{{1,2},{3,4}} -> [1,2,3,4]
+    public Value ConstInitVal(GrammarTree constInitValNode, ArrayList<Value> arrayValueList){
         ArrayList<GrammarTree> kidTreeList = constInitValNode.getKidTreeList();
         if(kidTreeList.size() == 1){
+            if(arrayValueList != null){
+                arrayValueList.add(ConstExp(kidTreeList.get(0)));
+                return null;
+            }
             return ConstExp(kidTreeList.get(0));
         }else{
             for (GrammarTree kidTree : kidTreeList) {
                 if(kidTree.getVname().equals("ConstInitVal")){
-                    return ConstInitVal(kidTree);
+                    ConstInitVal(kidTree, arrayValueList);
                 }
             }
         }
@@ -175,43 +242,104 @@ public class SymbolTableCreator {
         }
     }
 
-    private Instruction allocaInstr(){
+    private Instruction allocaInstr(boolean isArr, ArrayList<Value> arraySizeList, String dataType){
         String valueName = "%" + regNo;
         regNo++;
-        return new Instruction(valueName, Type.Var, false, curbb, Instruction.OPType.alloca, "int");
+        if(!isArr)
+            return new Instruction(valueName, Type.Var, false, curbb, Instruction.OPType.alloca, dataType);
+        String stringDataType = getStringDataType(arraySizeList);
+        Instruction arr =  new Instruction(valueName, Type.Var, true, curbb, Instruction.OPType.alloca, stringDataType);
+        arr.setArrayInfo(arraySizeList.size(), arraySizeList);
+        return arr;
+    }
+
+    private static String getStringDataType(ArrayList<Value> arraySizeList) {
+        String dataType = "[" + arraySizeList.get(0).getName() + " x ";
+        if(arraySizeList.size() == 1)
+            dataType += "i32]*";
+        else
+            dataType += "[" + arraySizeList.get(1).getName() + " x i32]]*";
+        return dataType;
+    }
+
+    private Instruction GEP(Value value, ArrayList<Value> indexList){
+        String valueName = "%" + regNo;
+        regNo++;
+        boolean isArr = value.isArray() && indexList.size() - 1 < value.getArrayInfo().arrayDim;
+        Instruction GEPInstr = new Instruction(valueName, Type.Var, isArr, curbb, Instruction.OPType.getelementptr, "i32*");
+        new Use(GEPInstr, value, 1);
+        for(int i = 0; i < indexList.size(); i++){
+            new Use(GEPInstr, indexList.get(i), i+2);
+        }
+        // a[5], gep 0 -> [5 x i32]*
+        // a[5][6], gep 0 -> [5 x [6 x i32]]*, gep 0 0 -> [6 x i32]*
+        if(isArr){
+            ArrayList<Value> arraySizeList = new ArrayList<>();
+            int size1 = value.getArrayInfo().arraySize1;
+            if(value.getArrayInfo().arrayDim == 1){     // a[5], gep 0 -> [5 x i32]*
+                arraySizeList.add(new Constant(String.valueOf(size1), false, "int", size1));
+            } else {    // a[5][6]
+                int size2 = value.getArrayInfo().arraySize2;
+                if(indexList.size() == 1){      // gep 0 -> [5 x [6 x i32]]*
+                    arraySizeList.add(new Constant(String.valueOf(size1), false, "int", size1));
+                    arraySizeList.add(new Constant(String.valueOf(size2), false, "int", size2));
+                } else {    // gep 0 0 -> [6 x i32]*
+                    arraySizeList.add(new Constant(String.valueOf(size2), false, "int", size2));
+                }
+            }
+            GEPInstr.setArrayInfo(arraySizeList.size(), arraySizeList);
+            GEPInstr.setDataType(getStringDataType(arraySizeList));
+        }
+        return GEPInstr;
     }
     // VarDef → Ident { '[' ConstExp ']' } // b
     //    | Ident { '[' ConstExp ']' } '=' InitVal // k✔
     // done
-    public void VarDef(GrammarTree varDefNode, String bType){
+    public void VarDef(GrammarTree varDefNode, String bType) {
         ArrayList<GrammarTree> kidTreeList = varDefNode.getKidTreeList();
         VtNode identNode = (VtNode) kidTreeList.get(0);
-        if(errorHandler.hasErrorB(curTable, identNode)){        //处理错误b
+        if (errorHandler.hasErrorB(curTable, identNode)) {        //处理错误b
             errorHandler.handleErrorB(identNode);
             return;
         }
         boolean isArray = false;
         int arrayDim = 0, i = 1;
-        while(i < kidTreeList.size() && kidTreeList.get(i).getVname().equals("[")){
+        ArrayList<Value> arraySizeList = new ArrayList<>();
+        while (i < kidTreeList.size() && kidTreeList.get(i).getVname().equals("[")) {
             isArray = true;
             arrayDim++;
-            ConstExp(kidTreeList.get(i + 1));
+            Value arraySize = ConstExp(kidTreeList.get(i + 1));
+            arraySizeList.add(arraySize);
             i += 3;
         }
         GrammarTree lastNode = kidTreeList.get(kidTreeList.size() - 1);
         Token token = identNode.getToken();
         User defValue;
-        if(isGlobal)        // @a = global i32 5
-            defValue = new GlobalVariable("@" + token.getTokenValue(), Type.Var, false, "int", false, module);
-        else                // %1=alloca i32
-            defValue = allocaInstr();
-        if(lastNode.getVname().equals("InitVal")){
-            Value initValue = InitVal(lastNode);
-            if(isGlobal)    // @a = global i32 5
-                new Use(defValue, initValue, 1);
-            else            // store i32 5, i32* %1
-                storeInstr(initValue, defValue);
-        } else if(isGlobal){
+        if (isGlobal){        // @a = global i32 5    @c = dso_local global
+            defValue = new GlobalVariable("@" + token.getTokenValue(), Type.Var, isArray, "int", false, module);
+            if (isArray){
+                defValue.setArrayInfo(arrayDim, arraySizeList);
+                defValue.setDataType(getStringDataType(arraySizeList));
+            }
+        }else                // %1=alloca i32        // %1 = alloca [2 x [2 x i32]]
+            defValue = allocaInstr(isArray, arraySizeList, "int");
+        if(lastNode.getVname().equals("InitVal")){  // 有初始化
+            ArrayList<Value> arrValueList = isArray ? new ArrayList<>() : null;
+            Value initValue = InitVal(lastNode, arrValueList);
+            if(isGlobal) {    // @a = global i32 5  @c = dso_local global [2 x [1 x i32]] [[1 x i32] [i32 1], [1 x i32] [i32 3]]
+                if(isArray)
+                    for(int j = 0; j < arrValueList.size(); j++)
+                        new Use(defValue, arrValueList.get(j), j+1);
+                else
+                    new Use(defValue, initValue, 1);
+            }
+            else {            // store i32 5, i32* %1   GEP memset GEP store
+                if(isArray)
+                    localArrInit(arrayDim, arraySizeList, arrValueList, defValue);
+                else
+                    storeInstr(initValue, defValue);
+            }
+        } else if(isGlobal && !isArray){    // 全局变量默认初始化为0
             new Use(defValue, new Constant("0", false, "int", 0), 1);
         }
         Symbol varSymbol = new Symbol(token.getTokenValue(), bType, defValue.getName(), token.getRow(), false, isArray, arrayDim, false);
@@ -220,14 +348,18 @@ public class SymbolTableCreator {
 
     // InitVal → Exp | '{' [ InitVal { ',' InitVal } ] '}'
     // done
-    public Value InitVal(GrammarTree initValNode){
+    public Value InitVal(GrammarTree initValNode, ArrayList<Value> arrayValueList){
         ArrayList<GrammarTree> kidTreeList = initValNode.getKidTreeList();
         if(kidTreeList.size() == 1){
+            if(arrayValueList != null){
+                arrayValueList.add(Exp(kidTreeList.get(0)));
+                return null;
+            }
             return Exp(kidTreeList.get(0));
         }else{
             for (GrammarTree kidTree : kidTreeList) {
                 if(kidTree.getVname().equals("InitVal")){
-                    return InitVal(kidTree);
+                    InitVal(kidTree, arrayValueList);
                 }
             }
         }
@@ -337,18 +469,22 @@ public class SymbolTableCreator {
         Token token = identNode.getToken();
         int arrayDim = 0, i = 2;
         boolean isArray = false;
+        ArrayList<Value> arraySizeList = new ArrayList<>();
         while(i < kidTreeList.size() && kidTreeList.get(i).getVname().equals("[")){
             isArray = true;
             arrayDim++;
+            if(kidTreeList.get(i + 1).getVname().equals("ConstExp")){
+                Value constExpValue = ConstExp(kidTreeList.get(i + 1));
+                arraySizeList.add(constExpValue);
+            }
             i++;
         }
         Symbol paramSymbol = new Symbol(token.getTokenValue(), bType, "%" + regNo, token.getRow(), false, isArray, arrayDim, false);
-        // 完成形参的alloca和load
-        Instruction allocaInstr = allocaInstr();
+        // 完成形参的alloca和store,
+        Instruction allocaInstr = allocaInstr(false, null, "int");
         //System.out.println(allocaInstr);
         Arg arg = curFunction.getArgs().get(paramNo - 1);
         storeInstr(arg, allocaInstr);
-
 
         curTable.addSymbol(paramSymbol);
         paramTypeList.add(bType);
@@ -388,7 +524,7 @@ public class SymbolTableCreator {
     }
 
     public Instruction loadInstr(Value src){
-        Instruction loadIns = new Instruction("%" + regNo, Type.Var, false, curbb, Instruction.OPType.load, "int");
+        Instruction loadIns = new Instruction("%" + regNo, Type.Var, false, curbb, Instruction.OPType.load, src.getDataType());
         new Use(loadIns, src, 1);
         regNo++;
         return loadIns;
@@ -412,23 +548,21 @@ public class SymbolTableCreator {
         ArrayList<GrammarTree> kidTreeList = stmtNode.getKidTreeList();
         switch (kidTreeList.get(0).getVname()){
             case "LVal":
-                // done
                 GrammarTree lValNode = kidTreeList.get(0);
-                VtNode identNode = LVal(lValNode);          // 返回标识符节点
-                //System.out.println(identNode.getToken().getTokenValue());
+                ArrayList<Value> arrIndexList = new ArrayList<>();
+                arrIndexList.add(new Constant("0", false, "int", 0));
+                VtNode identNode = LVal(lValNode, arrIndexList);          // 返回标识符节点
                 Symbol symbol = curTable.getDeclaredSymbol(identNode.getToken().getTokenValue());
                 String symbolReg = symbol.getReg();
                 Value symbolValue = getValue(symbolReg, curbb); // 获取标识符对应value
                 assert symbolValue != null;
+                if(symbolValue.isArray())
+                    symbolValue = GEP(symbolValue, arrIndexList); // 获取数组元素对应value
                 errorHandler.checkAndHandleErrorH(identNode, curTable);        //判断并处理错误h(修改常量值)
                 if(kidTreeList.get(2).getVname().equals("Exp")) {   // LVal '=' Exp ';'
                     GrammarTree expNode = kidTreeList.get(2);
                     Value exp = Exp(expNode);
-                    if(exp.isConstant()){   // 不用load
-                        storeInstr(exp, symbolValue);
-                    } else {    // 先load再store
-                        storeInstr(exp, symbolValue);
-                    }
+                    storeInstr(exp, symbolValue);
                 } else {    // LVal '=' 'getint''('')'';'
                     Instruction instruction = new Instruction("%" + regNo, Type.Var, false, curbb, Instruction.OPType.call, "int");
                     Function getintFunc = getFunction("getint");
@@ -670,13 +804,13 @@ public class SymbolTableCreator {
 
     // LVal → Ident {'[' Exp ']'} // c k✔
     // 返回Vtnode标识符节点
-    public VtNode LVal(GrammarTree lValNode){
+    public VtNode LVal(GrammarTree lValNode, ArrayList<Value> indexList){
         ArrayList<GrammarTree> kidTreeList = lValNode.getKidTreeList();
         VtNode identNode = (VtNode) kidTreeList.get(0);
         errorHandler.checkAndHandleErrorC(curTable, identNode);        //判断并处理错误c,标识符未定义
         for (int i = 1; i < kidTreeList.size(); i++) {
             if(kidTreeList.get(i).getVname().equals("Exp")){
-                Exp(kidTreeList.get(i));
+                indexList.add(Exp(kidTreeList.get(i)));
             }
         }
         return identNode;
@@ -691,16 +825,17 @@ public class SymbolTableCreator {
             case "(":
                 return Exp(kidTreeList.get(1));
             case "LVal":
-                VtNode identNode = LVal(firstNode);
+                ArrayList<Value> arrIndexList = new ArrayList<>();
+                arrIndexList.add(new Constant("0", false, "int", 0));  // gep指令的第一个参数为0
+                VtNode identNode = LVal(firstNode, arrIndexList);
                 Symbol symbol = curTable.getDeclaredSymbol(identNode.getToken().getTokenValue());
-                //System.out.println("PrimaryExp: " + symbol.getName());
                 String symbolReg = symbol.getReg();
-                //System.out.println("PrimaryExp: " + symbolReg);
                 Value symbolValue = getValue(symbolReg, curbb); // 获取标识符对应value
                 assert symbolValue != null;
-                if(symbolValue.isGlobalConstant()) {      // const int a = 1; 则直接返回常数1
+                if(symbolValue.isArray())   // 数组元素, gep+load或global const返回常数
+                    return getArrItemValue(symbolValue, arrIndexList);
+                if(symbolValue.isGlobalConstant())      // const int a = 1; 则直接返回常数1
                     return ((GlobalVariable) symbolValue).getOperands().get(0);
-                }
                 return loadInstr(symbolValue);
             case "Number":
                 VtNode intNode = (VtNode) firstNode.getKidTreeList().get(0);
@@ -789,6 +924,12 @@ public class SymbolTableCreator {
         for (GrammarTree grammarTree : kidTreeList) {
             if (grammarTree.getVname().equals("Exp")) {
                 Value exp = Exp(grammarTree);
+                if(exp.isArray()){
+                    ArrayList<Value> indexList = new ArrayList<>();
+                    indexList.add(new Constant("0", false, "int", 0));
+                    indexList.add(new Constant("0", false, "int", 0));
+                    exp = GEP(exp, indexList);
+                }
                 funcRParams.add(exp);
             }
         }

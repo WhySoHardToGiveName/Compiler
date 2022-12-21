@@ -1,11 +1,12 @@
 package ir;
 
+import java.util.ArrayList;
 import java.util.LinkedList;
 
 public class Value {
     private final String name;
     private final Type type;
-    private final String dataType;
+    private String dataType;
     private final LinkedList<Use> useList;
     private boolean isArray;
     private ArrayInfo arrayInfo;
@@ -23,11 +24,17 @@ public class Value {
         this.dataType = dataType;
         this.useList = new LinkedList<>();
     }
-    public void setArrayInfo(int arrayDim, int arraySize1, int arraySize2){
+    public void setArrayInfo(int arrayDim, ArrayList<Value> arraySizeList){
         this.arrayInfo = new ArrayInfo();
         this.arrayInfo.arrayDim = arrayDim;
-        this.arrayInfo.arraySize1 = arraySize1;
-        this.arrayInfo.arraySize2 = arraySize2;
+        this.arrayInfo.arraySize1 = ((Constant)arraySizeList.get(0)).getValue();
+        this.arrayInfo.arraySize2 = arrayDim == 2 ? ((Constant)arraySizeList.get(1)).getValue() : 0;
+    }
+    public boolean isArray() {
+        return isArray;
+    }
+    public void setDataType(String dataType){
+        this.dataType = dataType;
     }
     public ArrayInfo getArrayInfo(){
         return this.arrayInfo;

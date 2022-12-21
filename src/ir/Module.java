@@ -18,6 +18,7 @@ public class Module extends BasicBlock{
         new Function("@putint", "void", this);
         new Function("@putch", "void", this);
         new Function("@putstr", "void", this);
+        new Function("@memset", "void", this);
     }
 
     public static Module getModule() {

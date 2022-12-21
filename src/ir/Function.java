@@ -51,6 +51,9 @@ public class Function extends Value{
         if(this.getName().equals("@putstr")) {
             return "declare void @putstr(i8*)\n";
         }
+        if(this.getName().equals("@memset")) {
+            return "declare void @memset(i32*, i32, i32)\n";
+        }
         StringBuilder sb = new StringBuilder();
         String functype = this.getDataType().equals("void") ? "void" : "i32";
         sb.append("define dso_local ").append(functype).append(" ").append(this.getName()).append("(");

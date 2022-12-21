@@ -1,11 +1,13 @@
 package ir;
 
+import java.util.ArrayList;
+
 public class Instruction extends User{
     private BasicBlock parentBB;
     private OPType opType;
 
     public enum OPType{
-        add, sub, mul, sdiv, srem, shl, shr, and, or, xor, cmp, call, ret, br, phi, load, store, alloca, eq, ne, sgt, sge, slt, sle;
+        add, sub, mul, sdiv, srem, shl, shr, and, or, xor, cmp, call, ret, br, phi, load, store, alloca, eq, ne, sgt, sge, slt, sle, getelementptr;
 
         public static OPType getOpType(String op) {
             switch (op) {
@@ -42,7 +44,6 @@ public class Instruction extends User{
         parentBB.addInstruction(this);
         parentBB.getParentFunction().addInstruction(this);
     }
-
     public String toString(){
         String str = "";
         switch (opType){
@@ -85,7 +86,10 @@ public class Instruction extends User{
                 else
                     str = this.getName() + " = call i32 " + this.getOperands().get(0).getName() + "(";
                 for (int i = 1; i < this.getOperands().size(); i++) {
-                    str += "i32 " + this.getOperands().get(i).getName();
+                    if(this.getOperands().get(i).getDataType().equals("i32*"))
+                        str += "i32* " + this.getOperands().get(i).getName();
+                    else
+                        str += "i32 " + this.getOperands().get(i).getName();
                     if (i != this.getOperands().size() - 1) {
                         str += ", ";
                     }
@@ -99,19 +103,42 @@ public class Instruction extends User{
                     str = "ret void\n";
                 break;
             case load:
-                str = this.getName() + " = load i32, i32* " + this.getOperands().get(0).getName() + ", align 4\n";
+                if(this.getDataType().equals("int"))
+                    str = this.getName() + " = load i32, i32* " + this.getOperands().get(0).getName() + ", align 4\n";
+                else
+                    str = this.getName() + " = load " + this.getDataType() + ", " + this.getDataType() + " * " + this.getOperands().get(0).getName() + "\n";
                 break;
             case store:
-                str = "store i32 " + this.getOperands().get(0).getName() + ", i32* " + this.getOperands().get(1).getName() + ", align 4\n";
+                String dataType = this.getOperands().get(0).getDataType();
+                if(dataType.equals("int"))
+                    str = "store i32 " + this.getOperands().get(0).getName() + ", i32* " + this.getOperands().get(1).getName() + ", align 4\n";
+                else
+                    str = "store " + dataType + ' ' + this.getOperands().get(0).getName() + ", " + dataType + " * " + this.getOperands().get(1).getName() + "\n";
                 break;
             case alloca:
-                str = this.getName() + " = alloca i32, align 4\n";
+                if(this.isArray()){
+                    dataType = this.getDataType();
+                    str = this.getName() + " = alloca " + dataType.substring(0, dataType.length() - 1) + "\n";
+                } else {
+                    str = this.getName() + " = alloca i32, align 4\n";
+                }
                 break;
             case br:
                 if(this.getOperands().size() == 1)
                     str = "br label %" + this.getOperands().get(0).getName() + "\n";
                 else
                     str = "br i1 " + this.getOperands().get(0).getName() + ", label %" + this.getOperands().get(1).getName() + ", label %" + this.getOperands().get(2).getName() + "\n";
+                break;
+            case getelementptr:
+                ArrayList<Value> operands = this.getOperands();
+                dataType = operands.get(0).getDataType();
+                //去掉dataType后面的*
+                dataType = dataType.substring(0, dataType.length() - 1);
+                str = this.getName() + " = getelementptr " + dataType + ", " + dataType + "* " + operands.get(0).getName();
+                for (int i = 1; i < operands.size(); i++) {
+                    str += ", i32 " + operands.get(i).getName();
+                }
+                str += "\n";
                 break;
         }
         return str;
